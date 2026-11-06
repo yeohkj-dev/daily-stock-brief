@@ -1,0 +1,16 @@
+# 报告设定（改完 commit 即生效）
+
+# 涨跌超过这个百分比，算「大涨大跌」，会单独分析原因
+big_move_pct: 3
+
+# 新闻：每只股票最多显示几条
+news_per_stock: 4
+
+# 新闻时间窗口（小时）。找不到新闻时会自动放宽到 2 倍
+news_hours: 24
+
+# 把英文新闻标题和摘要翻译成中文（true / false）
+translate: true
+
+# 历史报告保留几份
+keep_archive: 120

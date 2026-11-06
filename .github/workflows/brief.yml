@@ -1,0 +1,55 @@
+name: 观察清单简报
+
+# 盘前版：美东约 07:15–09:15；收盘版：美东约 16:45–17:45。
+# GitHub 排程常晚 10–60 分钟，夏令时 / 冬令时也不同，所以每版排两次；
+# 程序按美东时间判断版本，同一天同一版只出一次，周末和休市日自动跳过。
+on:
+  schedule:
+    - cron: "15 12,13 * * 1-5"   # 盘前版
+    - cron: "45 20,21 * * 1-5"   # 收盘版
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "版本（留空 = 按美东时间自动判断）"
+        required: false
+        type: choice
+        options: ["", "premarket", "close"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 生成简报
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ARGS="--force"
+            if [ -n "${{ inputs.mode }}" ]; then ARGS="$ARGS --mode ${{ inputs.mode }}"; fi
+          fi
+          python tools/stock_brief.py $ARGS
+
+      - name: 保存结果
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add -A docs
+          if git diff --cached --quiet; then
+            echo "没有变化"
+          else
+            git commit -q -m "简报 $(TZ=America/New_York date +%Y-%m-%d\ %H:%M) ET"
+            git push
+          fi

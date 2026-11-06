@@ -1,0 +1,19 @@
+# 观察清单：一行一个美股代号，# 后面是备注（会被忽略）
+# 要加减股票，直接在 GitHub 上编辑这个文件，按 Commit 就好，下一次报告会自动用新清单。
+NVDA
+GOOG
+ORCL
+LITE
+AVGO
+HOOD
+RKLB
+AMD
+MCHP
+AAOI
+INTC
+ACHR
+PLTR
+ONDS
+SPMO
+AAPL
+IBM
