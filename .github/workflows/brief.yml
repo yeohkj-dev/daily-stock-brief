@@ -42,11 +42,19 @@ jobs:
           fi
           python tools/stock_brief.py $ARGS
 
+      # 发到 Telegram（只在报告成功生成后；同一份只发一次；发送失败不影响网站）
+      - name: 发送到 Telegram
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python tools/telegram_send.py
+
       - name: 保存结果
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
-          git add -A docs
+          git add -A docs telegram
           if git diff --cached --quiet; then
             echo "没有变化"
           else

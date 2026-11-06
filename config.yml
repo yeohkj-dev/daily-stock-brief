@@ -14,3 +14,6 @@ translate: true
 
 # 历史报告保留几份
 keep_archive: 120
+
+# 推送到 Telegram 的版本：close（收盘版，马来西亚早上）/ premarket（盘前版）/ both（两版都推）/ off（不推）
+telegram: close

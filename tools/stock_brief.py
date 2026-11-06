@@ -110,7 +110,7 @@ def read_watchlist():
 
 
 def read_config():
-    cfg = dict(big_move_pct=3.0, news_per_stock=4, news_hours=24, translate=True, keep_archive=120)
+    cfg = dict(big_move_pct=3.0, news_per_stock=4, news_hours=24, translate=True, keep_archive=120, telegram="close")
     p = os.path.join(ROOT, "config.yml")
     if os.path.exists(p):
         for line in open(p, encoding="utf-8-sig"):
@@ -120,7 +120,10 @@ def read_config():
             k, v = (x.strip() for x in line.split(":", 1))
             if k in cfg:
                 d = cfg[k]
-                cfg[k] = (v.lower() in ("true", "yes", "1")) if isinstance(d, bool) else type(d)(float(v)) if v else d
+                if isinstance(d, str):
+                    cfg[k] = v.lower() or d
+                else:
+                    cfg[k] = (v.lower() in ("true", "yes", "1")) if isinstance(d, bool) else type(d)(float(v)) if v else d
     return cfg
 
 
@@ -128,7 +131,7 @@ def read_config():
 COLS = ["name", "description", "close", "change", "premarket_change", "premarket_close", "postmarket_change",
         "postmarket_close", "volume", "average_volume_10d_calc", "relative_volume_10d_calc", "Perf.W", "Perf.1M",
         "Perf.YTD", "market_cap_basic", "sector", "industry", "earnings_release_date", "earnings_release_next_date",
-        "type", "high", "low", "gap"]
+        "type", "high", "low", "gap", "SMA50", "SMA200"]
 
 
 def tv_quotes(syms):
@@ -143,6 +146,64 @@ def tv_quotes(syms):
     return out
 
 
+# ---------------- 阶段（Stan Weinstein / J Law 的 Stage 1–4）----------------
+SLOPE_UP, SLOPE_DN = 1.0, -1.5    # 200 天线近 21 日变动 %：≥1 向上，≤-1.5 向下，中间走平（和 jlaw-daily-report 一致）
+STAGE_NAME = {1: "Stage 1 底部整理", 2: "Stage 2 上升阶段", 3: "Stage 3 顶部整理", 4: "Stage 4 下跌阶段"}
+STAGE_CLS = {1: "s1", 2: "s2", 3: "s3", 4: "s4"}
+
+
+def sma(v, n, back=0):
+    end = len(v) - back
+    return sum(v[end - n:end]) / n if end >= n else None
+
+
+def stage_of(c):
+    """c = 日收盘价（旧→新）。返回阶段、趋势和判断依据。
+    Stage 2：收盘 > 200 天线、50 天线 > 200 天线、200 天线向上
+    Stage 4：收盘 < 200 天线、50 天线 < 200 天线、200 天线向下
+    其余（200 天线走平或信号矛盾）：之前是上升 → Stage 3；之前是下跌 → Stage 1。"""
+    if len(c) < 252:
+        return None
+    close = c[-1]
+    s50, s200 = sma(c, 50), sma(c, 200)
+    sl200 = (s200 / sma(c, 200, 21) - 1) * 100
+    sl50 = (s50 / sma(c, 50, 10) - 1) * 100
+    prior = (sma(c, 200, 42) / sma(c, 200, 168) - 1) * 100 if len(c) >= 368 else (sma(c, 200, 42) / sma(c, 200, 52) - 1) * 100 * 12
+    hi52, lo52 = max(c[-252:]), min(c[-252:])
+    up200, dn200 = sl200 >= SLOPE_UP, sl200 <= SLOPE_DN
+    if close > s200 and up200:
+        stg = 2
+        if s50 > s200:
+            why = "收盘在 200 天线上、50 天线在 200 天线上、200 天线向上"
+            sub = "健康上升" if close > s50 else "上升中回调（跌破 50 天线）"
+        else:
+            why = "收盘在 200 天线上、200 天线向上，但 50 天线还没上穿 200 天线"
+            sub = "早期 Stage 2（50 天线未上穿）"
+    elif close < s200 and dn200:
+        stg = 4
+        if s50 < s200:
+            why = "收盘在 200 天线下、50 天线在 200 天线下、200 天线向下"
+            sub = "持续下跌" if close < s50 else "下跌中反弹（站上 50 天线）"
+        else:
+            why = "收盘在 200 天线下、200 天线向下，但 50 天线还没下穿 200 天线"
+            sub = "刚转入 Stage 4（50 天线未下穿）"
+    else:
+        stg = 3 if prior > 0 else 1
+        pos = "上" if close > s200 else "下"
+        d200 = "向上" if up200 else "向下" if dn200 else "走平"
+        why = (f"200 天线{d200}、收盘在 200 天线{pos}，信号未一致；之前 6 个月 200 天线"
+               f"{'上升' if prior > 0 else '下降'} {prior:+.1f}% → " + ("由升转弱，可能在做顶" if stg == 3 else "跌后横盘，可能在筑底"))
+        if stg == 3:
+            sub = "跌破 200 天线，有转入 Stage 4 风险" if close < s200 else "仍在 200 天线上，涨势放缓"
+        else:
+            sub = "站上 200 天线，留意转入 Stage 2" if close > s200 else "仍在 200 天线下"
+    mid = "上升" if close > s50 and sl50 > 0 else "下跌" if close < s50 and sl50 < 0 else "震荡"
+    long_ = "上升" if up200 else "下跌" if dn200 else "走平"
+    return dict(stage=stg, name=STAGE_NAME[stg], sub=sub, why=why, mid=mid, long=long_, close=close, s50=s50, s200=s200,
+                sl50=sl50, sl200=sl200, to50=(close / s50 - 1) * 100, to200=(close / s200 - 1) * 100,
+                from_hi=(close / hi52 - 1) * 100, from_lo=(close / lo52 - 1) * 100, sma_ok=True)
+
+
 # ---------------- 数据核对（Yahoo 交叉对照）----------------
 def last_session(et_now, mode):
     """应对照的最近一个已收盘交易日：美东 16:00 以后 = 今天，之前 = 前一个交易日（盘前版因此对照昨收）。"""
@@ -153,7 +214,7 @@ def last_session(et_now, mode):
 
 
 def yahoo_daily(sym):
-    r = json.loads(fetch(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(sym)}?range=10d&interval=1d"))
+    r = json.loads(fetch(f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(sym)}?range=2y&interval=1d"))
     res = r["chart"]["result"][0]
     closes = res["indicators"]["quote"][0]["close"]
     bars = [(to_et(dt.datetime.fromtimestamp(t, dt.timezone.utc)).date(), c) for t, c in zip(res["timestamp"], closes) if c]
@@ -198,9 +259,19 @@ def verify(syms, quotes, mode, et_now):
                 notes.append(f"盘前价 {pmc} 相对昨收 {tc} 是 {(pmc / tc - 1) * 100:+.2f}%，与盘前涨幅 {pm:+.2f}% 对不上"
                              "（盘前数据可能是旧的）")
         price_ok = not any(n.startswith(("收盘价", "涨跌幅", "Yahoo 最新")) for n in notes)
+        st = stage_of([c for _, c in bars])
+        if st:   # 用 Yahoo 算的 50 / 200 天线和 TradingView 的对照
+            for k, n in (("SMA50", "s50"), ("SMA200", "s200")):
+                tv = q.get(k)
+                if tv is None or abs(st[n] / tv - 1) > 0.01:
+                    level = "warn" if level == "ok" else level
+                    notes.append(f"{k[3:]} 天线不符：Yahoo 算 {st[n]:.2f} vs TradingView {tv}（阶段判断请谨慎）")
+                    st["sma_ok"] = False
+        else:
+            notes.append("历史不足 200 天，无法判断阶段")
         if not notes:
             notes.append(f"收盘 {c1:.2f}、涨跌 {ych:+.2f}% 与 Yahoo 一致（{d1}）")
-        return s, dict(level=level, notes=notes, yclose=c1, ychange=ych, price_ok=price_ok)
+        return s, dict(level=level, notes=notes, yclose=c1, ychange=ych, price_ok=price_ok, stage=st)
 
     with ThreadPoolExecutor(6) as ex:
         return dict(ex.map(one, syms)), want
@@ -332,10 +403,20 @@ def reasons_from(news):
     return [(t, it) for tag, _ in REASONS for t, it in found if t == tag]
 
 
-def explainers(news):
-    """挑出最能解释涨跌的报道：标题点名该股且讲涨跌的排前面，其次是带原因类别的；每条报道只出现一次。"""
-    a = [it for it in news if it["in_title"] and MOVE_RX.search(it["title"])]
-    b = [it for it in news if it not in a and it["in_title"] and tags_of(it)]
+UP_RX = re.compile(r"\b(jump|soar|surge|rall(y|ies|ied)|climb|gain|rise|rises|rose|pop|spike|skyrocket|higher|up \d)", re.I)
+DN_RX = re.compile(r"\b(fall|falls|fell|drop|sink|sinks|sank|slump|plunge|tumble|slide|slides|slid|crash|sell-?off|rout|lower|down \d)", re.I)
+
+
+def explainers(news, move=None):
+    """挑出最能解释涨跌的报道；每条报道只出现一次。顺序：
+    1) 标题点名该股、讲的涨跌方向和实际一致；2) 标题点名该股、讲「为什么」但没说方向；3) 标题点名该股、带原因类别。
+    标题讲的方向和实际相反的（例如股价跌、标题说涨）不当作原因。"""
+    same, opp = (DN_RX, UP_RX) if (move or 0) < 0 else (UP_RX, DN_RX)
+    named = [it for it in news if it["in_title"]]
+    a1 = [it for it in named if same.search(it["title"])]
+    a2 = [it for it in named if it not in a1 and MOVE_RX.search(it["title"]) and not opp.search(it["title"])]
+    b = [it for it in named if it not in a1 + a2 and tags_of(it) and not (opp.search(it["title"]) and not same.search(it["title"]))]
+    a = a1 + a2
     return [(it, tags_of(it, with_desc=it in a)) for it in (a + b)[:3]]
 
 
@@ -367,7 +448,7 @@ def explain(sym, q, mode, bench, news, th, now):
     bsym = "SMH" if q.get("industry") in SEMI else "QQQ"
     bmv = move_of(bench.get(bsym, {}), mode)
     lines = []
-    ex = explainers(news)
+    ex = explainers(news, mv)
     er = earnings_note(q, now)
     if er:
         lines.append(dict(text="📅 " + "；".join(er)))
@@ -404,6 +485,8 @@ table{width:100%;border-collapse:collapse;font-size:13.5px}th,td{padding:7px 8px
 th{color:var(--mut);font-weight:600;font-size:12.5px}th:first-child,td:first-child{text-align:left}.tw{overflow-x:auto}
 .up{color:var(--up)}.dn{color:var(--dn)}.mut{color:var(--mut)}.big{background:var(--hl)}
 .chip{display:inline-block;background:var(--chip);border-radius:6px;padding:1px 7px;margin:2px 4px 2px 0;font-size:12.5px}
+.s1{background:#e8eef7;color:#1f4e78}.s2{background:#dcfce7;color:#166534}.s3{background:#fef3c7;color:#92400e}.s4{background:#fee2e2;color:#991b1b}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .s1{background:#1e2a3a;color:#93c5fd}:root:not([data-theme=light]) .s2{background:#14301f;color:#86efac}:root:not([data-theme=light]) .s3{background:#3a2e12;color:#fcd34d}:root:not([data-theme=light]) .s4{background:#3b1a1a;color:#fca5a5}}
 .sym{font-weight:700;font-size:16px}a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
 ul{margin:6px 0;padding-left:20px}li{margin:4px 0}.en{color:var(--mut);font-size:12.5px}
 .nav{display:flex;gap:14px;flex-wrap:wrap;font-size:14px;margin:8px 0}.foot{color:var(--mut);font-size:12px;margin:28px 0 10px}
@@ -425,6 +508,21 @@ def when_txt(w):
     h = (dt.datetime.now(dt.timezone.utc) - w).total_seconds() / 3600
     ago = f"{h * 60:.0f} 分钟前" if h < 1 else f"{h:.0f} 小时前" if h < 48 else f"{h / 24:.0f} 天前"
     return f"{t:%Y-%m-%d %H:%M} 美东 · 大马 {m:%m-%d %H:%M} · {ago}"
+
+
+def stage_chip(st):
+    if not st:
+        return '<span class="mut">—</span>'
+    warn = "" if st.get("sma_ok", True) else " ⚠"
+    return f'<span class="chip {STAGE_CLS[st["stage"]]}">Stage {st["stage"]}{warn}</span>'
+
+
+def trend_txt(st):
+    if not st:
+        return '<span class="mut">—</span>'
+    arrow = {"上升": '<span class="up">↗ 上升</span>', "下跌": '<span class="dn">↘ 下跌</span>'}
+    return (arrow.get(st["mid"], f'<span class="mut">→ {st["mid"]}</span>') + " / "
+            + arrow.get(st["long"], f'<span class="mut">→ {st["long"]}</span>'))
 
 
 def price(x):
@@ -496,19 +594,43 @@ def build_html(mode, now_et, syms, quotes, bench, news_map, expl, cfg, missing, 
         flag = "🔥" if mv is not None and abs(mv) >= th else ""
         lv = checks.get(s, {}).get("level")
         ck = {"ok": "", "warn": " ⚠", "fail": " ❌"}.get(lv, "")
+        st = checks.get(s, {}).get("stage")
         rows += (f'<tr class="{"big" if flag else ""}"><td><a href="#{s}"><b>{s}</b></a>{ck} {flag}</td><td>{price(px)}</td>'
-                 f"<td>{pc(mv)}</td><td>{pc(ex)}</td><td>{pc(q.get('Perf.W'))}</td><td>{pc(q.get('Perf.1M'))}</td>"
+                 f"<td>{pc(mv)}</td><td>{pc(ex)}</td><td>{stage_chip(st)}</td><td>{trend_txt(st)}</td>"
+                 f"<td>{pc(q.get('Perf.W'))}</td><td>{pc(q.get('Perf.1M'))}</td>"
                  f"<td>{pc(q.get('Perf.YTD'))}</td><td>{'—' if rv is None else f'{rv:.1f}x'}</td></tr>")
     B.append("<h2>1. 每日动向</h2>")
-    B.append(f'<div class="card tw"><table><tr><th>代号</th><th>价格</th><th>{mv_col}</th><th>{ex_col}</th><th>5日</th>'
-             f"<th>1月</th><th>年初至今</th><th>量比</th></tr>{rows}</table>"
+    B.append(f'<div class="card tw"><table><tr><th>代号</th><th>价格</th><th>{mv_col}</th><th>{ex_col}</th><th>阶段</th>'
+             f"<th>趋势 中期/长期</th><th>5日</th><th>1月</th><th>年初至今</th><th>量比</th></tr>{rows}</table>"
              f'<div class="sub" style="margin-top:6px">🔥 = {mv_col}涨跌超过 ±{th:g}%。'
              + ("盘前价来自盘前成交，流动性低，仅供参考。" if mode == "premarket" else "量比 = 今日成交量 ÷ 10 日均量。")
              + (f" ⚠ 找不到：{', '.join(missing)}" if missing else "") + "</div></div>")
 
+    # 2. 阶段与趋势
+    B.append("<h2>2. 阶段与趋势（Stage 1–4）</h2>")
+    cnt = {k: [s for s in syms if (checks.get(s, {}).get("stage") or {}).get("stage") == k] for k in (1, 2, 3, 4)}
+    B.append('<div class="card">' + " ".join(f'<span class="chip {STAGE_CLS[k]}">{STAGE_NAME[k]}：{len(v)} 只</span>'
+                                              for k, v in cnt.items()) + "</div>")
+    srows = ""
+    for k in (2, 1, 3, 4):
+        for s in sorted(cnt[k], key=lambda s: -checks[s]["stage"]["to200"]):
+            st = checks[s]["stage"]
+            srows += (f'<tr><td><a href="#{s}"><b>{s}</b></a></td><td>{stage_chip(st)}</td><td style="text-align:left">{e(st["sub"])}</td>'
+                      f"<td>{trend_txt(st)}</td><td>{pc(st['to50'])}</td><td>{pc(st['to200'])}</td><td>{pc(st['sl200'], 2)}</td>"
+                      f"<td>{pc(st['from_hi'])}</td></tr>")
+    B.append(f'<div class="card tw"><table><tr><th>代号</th><th>阶段</th><th style="text-align:left">状态</th><th>趋势 中期/长期</th>'
+             f"<th>距50天线</th><th>距200天线</th><th>200天线月斜率</th><th>距52周高</th></tr>{srows}</table>"
+             '<div class="sub" style="margin-top:6px">'
+             "<b>Stage 2</b>：收盘 &gt; 200 天线且 200 天线向上（近 21 日 ≥ +1%）；50 天线未上穿 200 天线时标「早期」。"
+             "<b>Stage 4</b>：收盘 &lt; 200 天线且 200 天线向下（近 21 日 ≤ −1.5%）；50 天线未下穿时标「刚转入」。"
+             "<b>Stage 1 / 3</b>：200 天线走平或信号未一致，之前 6 个月 200 天线在升 → Stage 3（做顶），在跌 → Stage 1（筑底）。"
+             "<br><b>趋势</b>：中期 = 收盘相对 50 天线 + 50 天线方向（上升 / 下跌 / 震荡）；长期 = 200 天线方向。"
+             "均线由 Yahoo 日线计算，并与 TradingView 的 50 / 200 天线核对（误差 1% 内）。"
+             "程序判断只是近似，转折期（Stage 1↔2、3↔4）请看图确认。</div></div>")
+
     # 3. 大涨大跌原因
     bigs = [expl[s] for s in order if expl.get(s) and expl[s]["big"]]
-    B.append(f"<h2>2. 为何大涨大跌（{mv_col}超过 ±{th:g}%）</h2>")
+    B.append(f"<h2>3. 为何大涨大跌（{mv_col}超过 ±{th:g}%）</h2>")
     if not bigs:
         B.append(f'<div class="card mut">今天没有涨跌超过 ±{th:g}% 的股票。</div>')
     def line(l):
@@ -523,8 +645,8 @@ def build_html(mode, now_et, syms, quotes, bench, news_map, expl, cfg, missing, 
                  + "".join(line(l) for l in x["lines"])
                  + (f'<li>📉📈 {e(x["ctx"])}</li>' if x["ctx"] else "") + "</ul></div>")
 
-    # 2. 新闻
-    B.append("<h2>3. 新闻摘要</h2>")
+    # 4. 新闻
+    B.append("<h2>4. 新闻摘要</h2>")
     for s in order:
         q = quotes[s]
         ns = news_map.get(s, [])
@@ -539,14 +661,77 @@ def build_html(mode, now_et, syms, quotes, bench, news_map, expl, cfg, missing, 
                       + (f'<br><span>{e(zd)}</span>' if zd else (f'<br><span class="en">{e(it["desc"][:260])}</span>' if it["desc"] else ""))
                       + (f'<br><span class="en">{e(it["title"])}</span>' if zt else "") + "</li>")
         stale = " <span class=\"mut\">（24 小时内没有新闻，已放宽到 48 小时）</span>" if ns and ns[0].get("wide") else ""
+        st = checks.get(s, {}).get("stage")
+        sline = (f'<div style="margin:4px 0">{stage_chip(st)} {e(st["sub"])} · 趋势 {trend_txt(st)}'
+                 f'<br><span class="mut">判断依据：{e(st["why"])}；收盘 {price(st["close"])}，50 天线 {price(st["s50"])}（{st["to50"]:+.1f}%），'
+                 f'200 天线 {price(st["s200"])}（{st["to200"]:+.1f}%），距 52 周高 {st["from_hi"]:+.1f}%</span></div>') if st else ""
         B.append(f'<div class="card" id="{s}"><span class="sym">{s}</span> {pc(move_of(q, mode))} '
-                 f'<span class="mut">{e(q.get("description"))} · {e(q.get("industry") or "")}</span>{stale}<br>{er}{tags}'
+                 f'<span class="mut">{e(q.get("description"))} · {e(q.get("industry") or "")}</span>{stale}{sline}{er}{tags}'
                  + (f"<ul>{items}</ul>" if items else '<div class="mut">最近 48 小时没有找到相关新闻。</div>') + "</div>")
 
     B.append('<div class="foot">数据：TradingView（价格可能延迟约 15 分钟）、Yahoo Finance 与 Google News RSS。'
              "中文为机器翻译，以原文为准；「原因」按新闻关键词和大盘对比自动归类，是推断，不保证正确。"
              "<br>仅供学习，不构成投资建议。</div>")
     return page(f"观察清单 {label} {now_et:%Y-%m-%d}", "".join(B))
+
+
+SITE = "https://yeohkj-dev.github.io/daily-stock-brief/"
+NL = chr(10)
+
+
+def telegram_text(mode, et_now, syms, quotes, bench, expl, checks, news_chk, cfg):
+    """Telegram 简报（HTML 格式，4096 字以内）。"""
+    T = lambda x: html.escape(str(x), quote=False)
+    p = lambda x: "—" if x is None else f"{x:+.1f}%"
+    W = "一二三四五六日"
+    label = "盘前版" if mode == "premarket" else "收盘版"
+    th = cfg["big_move_pct"]
+    L = [f"<b>📈 观察清单 · {label}</b>",
+         f"{et_now:%Y-%m-%d}（周{W[et_now.weekday()]}）美东 {et_now:%H:%M} · 大马 {et_now.astimezone(MYT):%m-%d %H:%M}", ""]
+    L.append("<b>大盘</b> " + " · ".join(f"{s} {p(move_of(bench[s], mode))}" for s, _ in BENCH if s in bench))
+    mvs = [(s, move_of(quotes[s], mode)) for s in syms if s in quotes and move_of(quotes[s], mode) is not None]
+    if mvs:
+        L.append(f"<b>清单</b> 涨 {sum(m > 0 for _, m in mvs)} · 跌 {sum(m < 0 for _, m in mvs)} · 平均 {p(sum(m for _, m in mvs) / len(mvs))}")
+    nf = sum(checks.get(s, {}).get("level") != "ok" for s in syms)
+    L.append("🔎 数据核对：" + ("✅ 全部与 Yahoo 一致" if nf == 0 else f"⚠ {nf} 只有差异，详见网页"))
+
+    order = sorted(mvs, key=lambda x: x[1])
+    big = [(s, m) for s, m in order if abs(m) >= th]
+    L += ["", f"<b>🔥 大涨大跌（{'盘前' if mode == 'premarket' else '今日'} ±{th:g}%）：{len(big)} 只</b>"]
+    for s, m in sorted(big, key=lambda x: -abs(x[1])):
+        st = (checks.get(s) or {}).get("stage")
+        x = expl.get(s) or {}
+        news = [l for l in x.get("lines", []) if "link" in l]
+        er = [l for l in x.get("lines", []) if "link" not in l and l["text"].startswith("📅")]
+        line = f"• <b>{T(s)}</b> {p(m)}" + (f" · Stage {st['stage']}" if st else "")
+        if news:
+            n = news[0]
+            t = n["text"] if len(n["text"]) <= 60 else n["text"][:58] + "…"
+            line += NL + f"   {T(t)}（🕒 {to_et(n['when']):%m-%d %H:%M} 美东）"
+        elif er:
+            line += NL + f"   {T(er[0]['text'])}"
+        else:
+            line += NL + "   没找到明确个股消息"
+        if x.get("ctx"):
+            line += NL + f"   <i>{T(x['ctx'].split('；')[0])}</i>"
+        L.append(line)
+    if not big:
+        L.append("没有")
+
+    L += ["", "<b>📊 阶段</b>"]
+    for k in (2, 1, 3, 4):
+        ss = [s for s in syms if ((checks.get(s) or {}).get("stage") or {}).get("stage") == k]
+        if ss:
+            L.append(f"{STAGE_NAME[k]}：" + "、".join(ss))
+    up = [s for s in syms if ((checks.get(s) or {}).get("stage") or {}).get("mid") == "上升"]
+    if up:
+        L.append("中期上升趋势：" + "、".join(up))
+    L += ["", f'<a href="{SITE}">👉 完整报告（新闻、原因、日期链接）</a>', "<i>仅供学习，不构成投资建议</i>"]
+    text = NL.join(L)
+    if len(text) > 4000:                 # Telegram 上限 4096 字：太长就去掉每只股票的新闻细节行
+        L = [l.split(NL)[0] if l.startswith("• ") else l for l in L]
+        text = NL.join(L)
+    return text[:4090]
 
 
 def write_archive_index(keep):
@@ -640,6 +825,12 @@ def main():
     open(os.path.join(DOCS, "index.html"), "w", encoding="utf-8").write(out)
     open(os.path.join(DOCS, ".nojekyll"), "w").close()
     write_archive_index(int(cfg["keep_archive"]))
+    if cfg["telegram"] in (mode, "both"):
+        tg = telegram_text(mode, et, syms, quotes, bench, expl, checks, news_chk, cfg)
+        os.makedirs(os.path.join(ROOT, "telegram"), exist_ok=True)
+        with open(os.path.join(ROOT, "telegram", f"{et.date()}-{mode}.json"), "w", encoding="utf-8") as f:
+            json.dump(dict(id=f"{et.date()}-{mode}", telegram_html=tg), f, ensure_ascii=False, indent=1)
+        print(f"Telegram 简报已准备（{len(tg)} 字）")
     big = [f"{x['sym']} {x['move']:+.1f}%" for x in expl.values() if x and x["big"]]
     print(f"完成：docs/index.html、docs/archive/{name}；大涨大跌：{', '.join(big) or '无'}")
 
