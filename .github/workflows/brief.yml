@@ -27,7 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # 永远用最新的 main（Re-run 时 GitHub 默认用旧版本，推送会被拒绝）
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - uses: actions/setup-python@v5
         with:
@@ -59,5 +62,10 @@ jobs:
             echo "没有变化"
           else
             git commit -q -m "简报 $(TZ=America/New_York date +%Y-%m-%d\ %H:%M) ET"
-            git push
+            # 推送前先同步；期间有别的更新时，冲突的文件以这次新生成的为准；最多试 3 次
+            for i in 1 2 3; do
+              git pull -q --rebase -X theirs origin main && git push -q && exit 0
+              echo "推送失败，第 $i 次重试"; sleep 5
+            done
+            exit 1
           fi
