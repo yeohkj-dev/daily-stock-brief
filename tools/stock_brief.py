@@ -364,16 +364,44 @@ def translate(texts):
     out = {}
     chunk = []
 
+    errors = []
+    GTX = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t"
+
+    def gtx(q, post):
+        if post:   # POST：网址不会太长，也比较不容易被挡
+            r = fetch(GTX, data=urllib.parse.urlencode({"q": q}).encode(),
+                      headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}, tries=2)
+        else:
+            r = fetch(GTX + "&q=" + urllib.parse.quote(q), tries=2)
+        return "".join(seg[0] for seg in json.loads(r)[0] if seg[0])
+
+    def dict_ext(items):
+        """备用：Chrome 扩展用的翻译接口，一次可送多条。"""
+        url = ("https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=en&tl=zh-CN&"
+               + "&".join("q=" + urllib.parse.quote(t) for t in items))
+        r = json.loads(fetch(url, tries=2))
+        return [x[0] if isinstance(x, list) else x for x in r]
+
     def run(ch):
-        try:
-            q = "\n".join(t.replace("\n", " ") for t in ch)
-            r = json.loads(fetch("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q="
-                                 + urllib.parse.quote(q), tries=2))
-            zh = "".join(seg[0] for seg in r[0] if seg[0]).split("\n")
-            if len(zh) == len(ch):
-                out.update(zip(ch, (z.strip() for z in zh)))
-        except Exception:
-            pass
+        q = "\n".join(t.replace("\n", " ") for t in ch)
+        for post in (False, True):
+            try:
+                zh = gtx(q, post).split("\n")
+                if len(zh) == len(ch):
+                    out.update(zip(ch, (z.strip() for z in zh)))
+                    return
+                errors.append(f"行数不符 {len(zh)}/{len(ch)}")
+                break
+            except Exception as ex:
+                errors.append(f"gtx{'-POST' if post else ''} {type(ex).__name__}: {str(ex)[:60]}")
+        for i in range(0, len(ch), 8):
+            part = ch[i:i + 8]
+            try:
+                zh = dict_ext(part)
+                if len(zh) == len(part):
+                    out.update(zip(part, (z.strip() for z in zh)))
+            except Exception as ex:
+                errors.append(f"dict-ext {type(ex).__name__}: {str(ex)[:60]}")
 
     size = 0
     for t in texts:
@@ -384,6 +412,8 @@ def translate(texts):
         size += len(t) + 1
     if chunk:
         run(chunk)
+    if errors:
+        print(f"翻译问题（{len(errors)}）：" + "；".join(sorted(set(errors))[:6]))
     return out
 
 
