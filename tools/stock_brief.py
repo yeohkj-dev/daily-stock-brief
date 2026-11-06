@@ -374,7 +374,7 @@ def explain(sym, q, mode, bench, news, th, now):
     for it, tg in ex:
         d = it.get("zh_desc") or ""
         lines.append(dict(tags=" ".join(tg[:3]) or "📰 报道", text=it.get("zh_title") or it["title"], link=it["link"],
-                          src=it["src"], desc=(d[:110] + "…") if len(d) > 110 else d))
+                          src=it["src"], when=it["when"], desc=(d[:110] + "…") if len(d) > 110 else d))
     tags = ex
     ctx = ""
     if bmv is not None:
@@ -414,6 +414,17 @@ def pc(x, d=1):
     if x is None:
         return '<span class="mut">—</span>'
     return f'<span class="{"up" if x > 0 else "dn" if x < 0 else "mut"}">{x:+.{d}f}%</span>'
+
+
+MYT = dt.timezone(dt.timedelta(hours=8))
+
+
+def when_txt(w):
+    """新闻发布时间：美东 + 马来西亚时间 + 距今多久。"""
+    t, m = to_et(w), w.astimezone(MYT)
+    h = (dt.datetime.now(dt.timezone.utc) - w).total_seconds() / 3600
+    ago = f"{h * 60:.0f} 分钟前" if h < 1 else f"{h:.0f} 小时前" if h < 48 else f"{h / 24:.0f} 天前"
+    return f"{t:%Y-%m-%d %H:%M} 美东 · 大马 {m:%m-%d %H:%M} · {ago}"
 
 
 def price(x):
@@ -504,7 +515,7 @@ def build_html(mode, now_et, syms, quotes, bench, news_map, expl, cfg, missing, 
         if "link" not in l:
             return f"<li>{e(l['text'])}</li>"
         return (f'<li><span class="chip">{e(l["tags"])}</span><a href="{e(l["link"])}" target="_blank" rel="noopener">{e(l["text"])}</a>'
-                f' <span class="mut">· {e(l["src"])}</span>' + (f'<br><span class="mut">{e(l["desc"])}</span>' if l["desc"] else "") + "</li>")
+                f'<br><span class="mut">🕒 {when_txt(l["when"])} · {e(l["src"])}</span>' + (f'<br><span class="mut">{e(l["desc"])}</span>' if l["desc"] else "") + "</li>")
 
     for x in bigs:
         B.append(f'<div class="card"><span class="sym">{x["sym"]}</span> {pc(x["move"])} '
@@ -522,10 +533,9 @@ def build_html(mode, now_et, syms, quotes, bench, news_map, expl, cfg, missing, 
         er = "".join(f'<span class="chip">📅 {e(n)}</span>' for n in earnings_note(q, dt.datetime.now(dt.timezone.utc)))
         items = ""
         for it in ns:
-            t = to_et(it["when"])
             zt, zd = it.get("zh_title"), it.get("zh_desc")
             items += (f'<li><a href="{e(it["link"])}" target="_blank" rel="noopener">{e(zt or it["title"])}</a>'
-                      f' <span class="mut">· {e(it["src"])} · {t:%m-%d %H:%M}</span>'
+                      f'<br><span class="mut">🕒 {when_txt(it["when"])} · {e(it["src"])}</span>'
                       + (f'<br><span>{e(zd)}</span>' if zd else (f'<br><span class="en">{e(it["desc"][:260])}</span>' if it["desc"] else ""))
                       + (f'<br><span class="en">{e(it["title"])}</span>' if zt else "") + "</li>")
         stale = " <span class=\"mut\">（24 小时内没有新闻，已放宽到 48 小时）</span>" if ns and ns[0].get("wide") else ""
